@@ -6,6 +6,7 @@ extern "C"
 #endif
 
 int TOR_start(int argc, char *argv[]);
+const char* TOR_version();
 
 #ifdef __cplusplus
 }

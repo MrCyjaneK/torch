@@ -35,6 +35,10 @@ extern ADDAPI int TOR_start(int argc, char *argv[]) {
     return run_result;
 }
 
+const char* TOR_version() {
+    return tor_api_get_provider_version();
+}
+
 #ifdef __cplusplus
 }
 #endif
