@@ -3,6 +3,8 @@ project(torch)
 
 set(CMAKE_CXX_STANDARD 17)
 
+find_package(Threads REQUIRED)
+
 set(TOR_BUILD_DIR "" CACHE PATH "Path to tor build directory")
 
 if(NOT TOR_BUILD_DIR)
@@ -23,6 +25,7 @@ target_link_libraries(torch
         ${TOR_BUILD_DIR}/lib/libz.a
         ${TOR_BUILD_DIR}/lib/libcrypto.a
         ${TOR_BUILD_DIR}/lib/libssl.a
+        Threads::Threads
 )
 
 install(TARGETS torch

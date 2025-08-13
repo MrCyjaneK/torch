@@ -1,9 +1,14 @@
 #include "torch.h"
 #include <iostream>
+#include <sys/wait.h>
+#include <unistd.h>
+#include <signal.h>
+#include <thread>
+#include <atomic>
+#include <cstring>
 
 #ifdef __ANDROID__
-#include <unistd.h>     // for pipe, read, dup2, STDOUT_FILENO, STDERR_FILENO
-#include <thread>       // for std::thread
+#include <unistd.h>
 #include <android/log.h>
 
 #define LOG_TAG "torch"
@@ -60,12 +65,21 @@ void setupAndroidLogging() {
 
 #endif // __ANDROID__
 
+static std::atomic<bool> tor_running{false};
+static std::thread tor_thread;
+
+void sigchld_handler(int sig) {
+    while (waitpid(-1, NULL, WNOHANG) > 0) {
+        // Reap all available child processes
+    }
+}
 
 __attribute__((constructor))
 void library_init() {
 #ifdef __ANDROID__
     setupAndroidLogging();
 #endif
+    signal(SIGCHLD, sigchld_handler);
 }
 
 #ifdef __cplusplus
@@ -77,30 +91,100 @@ extern "C"
 #else
 #define ADDAPI __attribute__((__visibility__("default")))
 #endif
+
 #include <tor/feature/api/tor_api.h>
 
-extern ADDAPI int TOR_start(int argc, char *argv[]) {
+void run_tor_in_thread(int argc, char** argv) {
     tor_main_configuration_t* cfg = tor_main_configuration_new();
     if (!cfg) {
-        std::cerr << "libtor.so: Failed to create Tor configuration\n";
-        return -1;
+        std::cerr << "torch: Failed to create Tor configuration\n";
+        tor_running = false;
+        return;
     }
 
     int set_result = tor_main_configuration_set_command_line(cfg, argc, argv);
     if (set_result != 0) {
-        std::cerr << "libtor.so: Failed to set command-line args for Tor\n";
+        std::cerr << "torch: Failed to set command-line args for Tor\n";
         tor_main_configuration_free(cfg);
-        return set_result;
+        tor_running = false;
+        return;
     }
 
-    // tor_control_socket_t ctrl = tor_main_configuration_setup_control_socket(cfg);
-
+    std::cout << "torch: Starting TOR in background thread\n";
     int run_result = tor_run_main(cfg);
 
-    // Free configuration
     tor_main_configuration_free(cfg);
+    tor_running = false;
+    
+    if (run_result != 0) {
+        std::cerr << "torch: Tor exited with code: " << run_result << "\n";
+    }
+}
 
-    return run_result;
+extern ADDAPI int TOR_start(int argc, char *argv[]) {
+#ifdef __APPLE__
+    // iOS doesn't allow fork(), use threads instead
+    if (tor_running.load()) {
+        std::cout << "torch: TOR is already running\n";
+        return 0;
+    }
+    
+    if (tor_thread.joinable()) {
+        tor_thread.join();
+    }
+    
+    char** argv_copy = new char*[argc];
+    for (int i = 0; i < argc; i++) {
+        size_t len = strlen(argv[i]) + 1;
+        argv_copy[i] = new char[len];
+        strcpy(argv_copy[i], argv[i]);
+    }
+    
+    tor_running = true;
+    tor_thread = std::thread([argc, argv_copy]() {
+        run_tor_in_thread(argc, argv_copy);
+        
+        for (int i = 0; i < argc; i++) {
+            delete[] argv_copy[i];
+        }
+        delete[] argv_copy;
+    });
+    
+    tor_thread.detach();
+    std::cout << "torch: TOR started in background thread\n";
+    return 0;
+#else
+    pid_t pid = fork();
+    
+    if (pid == -1) {
+        std::cerr << "torch: Failed to fork process\n";
+        return -1;
+    }
+    
+    if (pid == 0) {
+        tor_main_configuration_t* cfg = tor_main_configuration_new();
+        if (!cfg) {
+            std::cerr << "torch: Failed to create Tor configuration\n";
+            _exit(-1);
+        }
+
+        int set_result = tor_main_configuration_set_command_line(cfg, argc, argv);
+        if (set_result != 0) {
+            std::cerr << "torch: Failed to set command-line args for Tor\n";
+            tor_main_configuration_free(cfg);
+            _exit(set_result);
+        }
+
+        int run_result = tor_run_main(cfg);
+
+        tor_main_configuration_free(cfg);
+
+        _exit(run_result);
+    }
+    
+    std::cout << "torch: TOR started in background process (PID: " << pid << ")\n";
+    return 0;
+#endif
 }
 
 const char* TOR_version() {
